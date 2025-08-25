@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from pathlib import Path
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 # Define o layout da página para ser 'wide', aproveitando melhor o espaço da tela.
@@ -71,42 +72,58 @@ def identificar_tipo_opcao(ticker):
         return 'N/D'
 
 @st.cache_data(ttl=600) # Adiciona cache para otimizar a performance, atualizando a cada 10 minutos.
-def carregar_dados_excel(caminho_arquivo):
+def carregar_dados_sheets():
     """
-    Função principal para ler e processar o arquivo Excel completo.
-    Lê a aba 'Clientes' e, em seguida, itera por cada aba de cliente para extrair
-    as carteiras de investimentos e de opções, agora separadas por mês.
+    Função segura para ler e processar a Planilha Google.
+    Usa os segredos do Streamlit para autenticação.
     """
     try:
-        df_clientes = pd.read_excel(caminho_arquivo, sheet_name='Clientes')
+        # Define o escopo de permissões (apenas leitura)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        # Carrega as credenciais a partir dos segredos do Streamlit
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"], scopes=scopes
+        )
+        client = gspread.authorize(creds)
+
+        # Abre a planilha usando o URL armazenado nos segredos
+        spreadsheet = client.open_by_url(st.secrets["private_gsheets_url"])
+        
+        # --- Leitura da aba 'Clientes' ---
+        sheet_clientes = spreadsheet.worksheet("Clientes")
+        df_clientes = pd.DataFrame(sheet_clientes.get_all_records())
         df_clientes['Início do Acompanhamento'] = pd.to_datetime(df_clientes['Início do Acompanhamento'], errors='coerce')
-    except Exception as e:
-        st.error(f"Erro ao ler a aba 'Clientes' do arquivo '{caminho_arquivo}'. Verifique se a aba e o arquivo existem. Erro: {e}")
-        return pd.DataFrame(), {}
 
-    xls = pd.ExcelFile(caminho_arquivo)
-    nomes_clientes = df_clientes['Nome'].tolist()
-    dados_completos_clientes = {}
-    
-    meses_pt = ['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO']
+        # --- Leitura das abas individuais ---
+        nomes_clientes = df_clientes['Nome'].tolist()
+        dados_completos_clientes = {}
+        
+        meses_pt = ['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO']
 
-    for nome in nomes_clientes:
-        if nome in xls.sheet_names:
+        for nome in nomes_clientes:
             try:
-                df_cliente_raw = pd.read_excel(xls, sheet_name=nome, header=None).fillna('')
+                worksheet = spreadsheet.worksheet(nome)
+                data = worksheet.get_all_values()
+                df_cliente_raw = pd.DataFrame(data).fillna('')
                 
+                # Extração da Carteira de Investimentos
                 try:
                     start_row_inv = df_cliente_raw[df_cliente_raw[0] == 'CÓDIGO'].index[0]
-                    header_inv = ['Código', 'Quantidade', 'Preço Médio', 'Valor Investido']
-                    df_investimentos = pd.read_excel(xls, sheet_name=nome, header=start_row_inv, usecols="A:D")
-                    df_investimentos.columns = header_inv
+                    # Pega o cabeçalho e os dados
+                    header_inv = df_cliente_raw.iloc[start_row_inv].tolist()
+                    data_inv = df_cliente_raw.iloc[start_row_inv + 1:].values.tolist()
+                    df_investimentos = pd.DataFrame(data_inv, columns=header_inv)
+                    # Pega apenas as 4 primeiras colunas
+                    df_investimentos = df_investimentos.iloc[:, :4]
+                    df_investimentos.columns = ['Código', 'Quantidade', 'Preço Médio', 'Valor Investido']
                     df_investimentos.dropna(how='all', inplace=True)
                     df_investimentos['Quantidade'] = pd.to_numeric(df_investimentos['Quantidade'], errors='coerce').round().astype('Int64')
                     df_investimentos['Valor Investido'] = df_investimentos['Valor Investido'].apply(limpar_valor_monetario)
                     df_investimentos['Preço Médio'] = df_investimentos['Preço Médio'].apply(limpar_valor_monetario)
-                except IndexError:
+                except (IndexError, ValueError):
                     df_investimentos = pd.DataFrame(columns=['Código', 'Quantidade', 'Preço Médio', 'Valor Investido'])
 
+                # Extração da Carteira de Opções
                 df_opcoes_final = pd.DataFrame()
                 lista_df_opcoes = []
                 
@@ -148,33 +165,29 @@ def carregar_dados_excel(caminho_arquivo):
                     'investimentos': df_investimentos,
                     'opcoes': df_opcoes_final
                 }
+            except gspread.exceptions.WorksheetNotFound:
+                st.warning(f"Aba para o cliente '{nome}' não encontrada na Planilha Google.")
+                dados_completos_clientes[nome] = {'investimentos': pd.DataFrame(), 'opcoes': pd.DataFrame()}
             except Exception as e:
                 st.warning(f"Não foi possível processar a aba para o cliente '{nome}'. Verifique o formato. Erro: {e}")
                 dados_completos_clientes[nome] = {'investimentos': pd.DataFrame(), 'opcoes': pd.DataFrame()}
-        else:
-            st.warning(f"Aba para o cliente '{nome}' não encontrada no arquivo Excel.")
-            dados_completos_clientes[nome] = {'investimentos': pd.DataFrame(), 'opcoes': pd.DataFrame()}
-            
-    return df_clientes, dados_completos_clientes
+        
+        return df_clientes, dados_completos_clientes
+
+    except Exception as e:
+        st.error(f"Erro ao conectar com o Google Sheets. Verifique seus 'Secrets' e as permissões da planilha. Detalhes: {e}")
+        return pd.DataFrame(), {}
 
 # --- INÍCIO DO DASHBOARD ---
 st.title("📈 Dashboard de Acompanhamento de Clientes")
 st.markdown("Use o menu na lateral para navegar entre as seções.")
 
-caminho_do_arquivo = Path("clientes.xlsx")
+# Carrega os dados de forma segura a partir do Google Sheets
+df_clientes, dados_carteiras = carregar_dados_sheets()
 
-if not caminho_do_arquivo.is_file():
-    st.error(f"Arquivo '{caminho_do_arquivo}' não encontrado. Por favor, coloque o arquivo na mesma pasta do script ou faça o upload abaixo.")
-    uploaded_file = st.file_uploader("Faça o upload do seu arquivo 'clientes.xlsx'", type=["xlsx"])
-    if uploaded_file is not None:
-        caminho_do_arquivo = uploaded_file
-    else:
-        st.stop()
-
-df_clientes, dados_carteiras = carregar_dados_excel(caminho_do_arquivo)
-
+# Verifica se os dados foram carregados antes de continuar
 if df_clientes.empty:
-    st.warning("Nenhum dado de cliente para exibir. Verifique o arquivo Excel.")
+    st.warning("Nenhum dado de cliente para exibir. Verifique a conexão com o Google Sheets e o conteúdo da planilha.")
     st.stop()
 
 # --- BARRA LATERAL DE NAVEGAÇÃO ---
@@ -321,4 +334,6 @@ elif pagina_selecionada == "📈 Carteira de Opções":
 
 # --- Seção de Rodapé ---
 st.sidebar.markdown("---")
-st.sidebar.info("Dashboard desenvolvido para gestão de carteiras. v1.5")
+st.sidebar.info("Dashboard desenvolvido para gestão de carteiras. v1.6")
+
+
