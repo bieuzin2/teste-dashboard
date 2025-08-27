@@ -331,6 +331,36 @@ def atualizar_carteira_opcoes(nome_cliente, df_nova_carteira_opcoes):
         st.error(f"Ocorreu um erro ao atualizar a carteira de opções: {e}")
         return False
 
+# --- NOVA FUNÇÃO PARA ATUALIZAR A LISTA DE CLIENTES ---
+def atualizar_lista_clientes(df_clientes_atualizado):
+    """Atualiza a lista de clientes na Planilha Google."""
+    try:
+        spreadsheet = conectar_gsheets()
+        sheet_clientes = spreadsheet.worksheet("Clientes")
+
+        # Prepara o DataFrame para ser salvo
+        df_para_salvar = df_clientes_atualizado.copy()
+        
+        # LÓGICA DE ATUALIZAÇÃO: Se o vencimento foi editado, recalcula o início.
+        # Isso prioriza a data de renovação editada pelo usuário.
+        df_para_salvar['Início do Acompanhamento'] = pd.to_datetime(df_para_salvar['Vencimento do Acompanhamento']) - pd.DateOffset(years=1)
+
+        # Garante que apenas as colunas originais sejam salvas
+        colunas_originais = ['Nome', 'Celular', 'Email', 'Plano', 'Início do Acompanhamento']
+        df_para_salvar = df_para_salvar[colunas_originais]
+
+        # Formata a data para o formato string esperado pela planilha
+        df_para_salvar['Início do Acompanhamento'] = pd.to_datetime(df_para_salvar['Início do Acompanhamento']).dt.strftime('%d/%m/%Y')
+
+        # Limpa a aba inteira e reescreve cabeçalho e dados
+        sheet_clientes.clear() 
+        sheet_clientes.update([df_para_salvar.columns.values.tolist()] + df_para_salvar.values.tolist(), value_input_option='USER_ENTERED')
+        
+        return True
+    except Exception as e:
+        st.error(f"Ocorreu um erro ao atualizar a lista de clientes: {e}")
+        return False
+
 # --- INTERFACE DO DASHBOARD ---
 st.title("Dashboard de Acompanhamento de Clientes")
 st.markdown("Use o menu na lateral para navegar entre as seções.")
@@ -415,43 +445,61 @@ else:
             st.plotly_chart(fig_evolucao, use_container_width=True)
         
         st.subheader("Lista de Clientes")
-        df_clientes_display = df_clientes.copy()
+        
+        # --- LÓGICA DE EDIÇÃO DA LISTA DE CLIENTES ---
+        with st.form(key="edicao_clientes_form"):
+            st.markdown("Adicione, remova ou edite os clientes abaixo. A coluna de ação é calculada automaticamente.")
+            
+            # --- NOVA LÓGICA PARA VENCIMENTO DO ACOMPANHAMENTO ---
+            def calcular_proximo_vencimento(inicio_date):
+                if pd.isna(inicio_date):
+                    return None
+                hoje = datetime.now()
+                vencimento = inicio_date + pd.DateOffset(years=1)
+                while vencimento < hoje:
+                    vencimento += pd.DateOffset(years=1)
+                return vencimento
 
-        # --- NOVA LÓGICA PARA VENCIMENTO DO ACOMPANHAMENTO ---
-        # Calcula a data de vencimento (1 ano após o início)
-        df_clientes_display['Vencimento do Acompanhamento'] = df_clientes_display['Início do Acompanhamento'] + pd.DateOffset(years=1)
+            df_clientes_display = df_clientes.copy()
+            df_clientes_display['Vencimento do Acompanhamento'] = df_clientes_display['Início do Acompanhamento'].apply(calcular_proximo_vencimento)
 
-        # Função para gerar o link de contato se o vencimento for no mês atual
-        def gerar_acao_vencimento(row):
-            hoje = datetime.now()
-            vencimento = row['Vencimento do Acompanhamento']
-            celular = row['Celular']
+            def gerar_acao_vencimento(row):
+                hoje = datetime.now()
+                vencimento = row['Vencimento do Acompanhamento']
+                celular = row['Celular']
+                if pd.notna(vencimento) and vencimento.month == hoje.month and vencimento.year == hoje.year:
+                    if pd.notna(celular) and str(celular).strip():
+                        celular_limpo = ''.join(filter(str.isdigit, str(celular)))
+                        return f"https://wa.me/{celular_limpo}"
+                return None
 
-            if pd.notna(vencimento) and vencimento.month == hoje.month and vencimento.year == hoje.year:
-                if pd.notna(celular) and str(celular).strip():
-                    celular_limpo = ''.join(filter(str.isdigit, str(celular)))
-                    return f"https://wa.me/{celular_limpo}"
-            return None # Retorna None se não houver ação
+            df_clientes_display['Ação'] = df_clientes_display.apply(gerar_acao_vencimento, axis=1)
 
-        df_clientes_display['Ação'] = df_clientes_display.apply(gerar_acao_vencimento, axis=1)
+            colunas_para_exibir = ['Nome', 'Celular', 'Email', 'Plano', 'Início do Acompanhamento', 'Vencimento do Acompanhamento', 'Ação']
+            
+            clientes_editados = st.data_editor(
+                df_clientes_display[colunas_para_exibir],
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Início do Acompanhamento": st.column_config.DateColumn("Início", format="DD/MM/YYYY", required=True),
+                    "Vencimento do Acompanhamento": st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY", required=True),
+                    "Ação": st.column_config.LinkColumn("Ação", display_text="Contatar 📞", disabled=True),
+                    "Nome": st.column_config.TextColumn(required=True)
+                },
+                key="editor_clientes"
+            )
+            
+            submitted = st.form_submit_button("Salvar Alterações na Lista de Clientes")
 
-        # Reordena as colunas para exibição
-        colunas_para_exibir = [
-            'Nome', 'Celular', 'Email', 'Plano',
-            'Início do Acompanhamento', 'Vencimento do Acompanhamento', 'Ação'
-        ]
-        colunas_finais = [col for col in colunas_para_exibir if col in df_clientes_display.columns]
-
-        st.dataframe(
-            df_clientes_display[colunas_finais],
-            column_config={
-                "Início do Acompanhamento": st.column_config.DateColumn("Início", format="DD/MM/YYYY"),
-                "Vencimento do Acompanhamento": st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY"),
-                "Ação": st.column_config.LinkColumn("Ação", display_text="Contatar 📞")
-            },
-            use_container_width=True,
-            hide_index=True
-        )
+        if submitted:
+            with st.spinner("A atualizar lista de clientes..."):
+                sucesso = atualizar_lista_clientes(clientes_editados)
+                if sucesso:
+                    st.success("Lista de clientes atualizada com sucesso!")
+                    st.cache_data.clear()
+                    st.rerun()
 
     elif pagina_selecionada == "💰 Carteira de Investimentos":
         st.header("Análise da Carteira de Investimentos")
@@ -691,4 +739,4 @@ else:
                     )
 
 st.sidebar.markdown("---")
-st.sidebar.info("Dashboard desenvolvido para gestão de carteiras. v5.6")
+st.sidebar.info("Dashboard desenvolvido para gestão de carteiras. v2.0")
