@@ -453,12 +453,16 @@ else:
             # --- NOVA LÓGICA PARA VENCIMENTO DO ACOMPANHAMENTO ---
             def calcular_proximo_vencimento(inicio_date):
                 if pd.isna(inicio_date):
-                    return None
-                hoje = datetime.now()
-                vencimento = inicio_date + pd.DateOffset(years=1)
-                while vencimento < hoje:
-                    vencimento += pd.DateOffset(years=1)
-                return vencimento
+                    return pd.NaT
+                hoje = pd.to_datetime(date.today())
+                # Calcula o aniversário deste ano
+                aniversario_ano_atual = inicio_date.replace(year=hoje.year)
+                
+                # Se o aniversário deste ano já passou, o próximo é no ano que vem
+                if aniversario_ano_atual < hoje:
+                    return aniversario_ano_atual.replace(year=hoje.year + 1)
+                else:
+                    return aniversario_ano_atual
 
             df_clientes_display = df_clientes.copy()
             df_clientes_display['Vencimento do Acompanhamento'] = df_clientes_display['Início do Acompanhamento'].apply(calcular_proximo_vencimento)
