@@ -335,7 +335,7 @@ def atualizar_carteira_opcoes(nome_cliente, df_nova_carteira_opcoes):
 st.title("Dashboard de Acompanhamento de Clientes")
 st.markdown("Use o menu na lateral para navegar entre as seções.")
 
-st.sidebar.image("https://i.ibb.co/ymrwQqB1/230x0w.webp", width=100)
+st.sidebar.image("https://i.ibb.co/ymrwQqB1/230x0w.webp", width=120)
 st.sidebar.title("Menu de Navegação")
 pagina_selecionada = st.sidebar.radio(
     "Selecione uma seção:",
@@ -405,20 +405,53 @@ else:
         st.markdown("---")
         col_graf1, col_graf2 = st.columns(2)
         with col_graf1:
-            # Gráfico de Pizza com nova paleta
             fig_plano = px.pie(df_clientes, names='Plano', title='Distribuição de Clientes por Plano', hole=0.4, 
                                color_discrete_sequence=['#075025', '#0C773C', '#BE9D5B'])
             st.plotly_chart(fig_plano, use_container_width=True)
         with col_graf2:
             df_clientes_por_data = df_clientes.dropna(subset=['Início do Acompanhamento']).set_index('Início do Acompanhamento').resample('ME').size().reset_index(name='Novos Clientes')
-            # Gráfico de Linha com nova paleta
             fig_evolucao = px.line(df_clientes_por_data, x='Início do Acompanhamento', y='Novos Clientes', title='Evolução de Inícios de Acompanhamento', markers=True)
             fig_evolucao.update_traces(line_color='#0C773C', marker_color='#BE9D5B')
             st.plotly_chart(fig_evolucao, use_container_width=True)
+        
         st.subheader("Lista de Clientes")
         df_clientes_display = df_clientes.copy()
-        df_clientes_display.index = range(1, len(df_clientes_display) + 1)
-        st.dataframe(df_clientes_display.style.format({"Início do Acompanhamento": lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else ''}), use_container_width=True)
+
+        # --- NOVA LÓGICA PARA VENCIMENTO DO ACOMPANHAMENTO ---
+        # Calcula a data de vencimento (1 ano após o início)
+        df_clientes_display['Vencimento do Acompanhamento'] = df_clientes_display['Início do Acompanhamento'] + pd.DateOffset(years=1)
+
+        # Função para gerar o link de contato se o vencimento for no mês atual
+        def gerar_acao_vencimento(row):
+            hoje = datetime.now()
+            vencimento = row['Vencimento do Acompanhamento']
+            celular = row['Celular']
+
+            if pd.notna(vencimento) and vencimento.month == hoje.month and vencimento.year == hoje.year:
+                if pd.notna(celular) and str(celular).strip():
+                    celular_limpo = ''.join(filter(str.isdigit, str(celular)))
+                    return f"https://wa.me/{celular_limpo}"
+            return None # Retorna None se não houver ação
+
+        df_clientes_display['Ação'] = df_clientes_display.apply(gerar_acao_vencimento, axis=1)
+
+        # Reordena as colunas para exibição
+        colunas_para_exibir = [
+            'Nome', 'Celular', 'Email', 'Plano',
+            'Início do Acompanhamento', 'Vencimento do Acompanhamento', 'Ação'
+        ]
+        colunas_finais = [col for col in colunas_para_exibir if col in df_clientes_display.columns]
+
+        st.dataframe(
+            df_clientes_display[colunas_finais],
+            column_config={
+                "Início do Acompanhamento": st.column_config.DateColumn("Início", format="DD/MM/YYYY"),
+                "Vencimento do Acompanhamento": st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY"),
+                "Ação": st.column_config.LinkColumn("Ação", display_text="Contatar 📞")
+            },
+            use_container_width=True,
+            hide_index=True
+        )
 
     elif pagina_selecionada == "💰 Carteira de Investimentos":
         st.header("Análise da Carteira de Investimentos")
@@ -658,4 +691,4 @@ else:
                     )
 
 st.sidebar.markdown("---")
-st.sidebar.info("Dashboard desenvolvido para gestão de carteiras. v2.0")
+st.sidebar.info("Dashboard desenvolvido para gestão de carteiras. v5.6")
