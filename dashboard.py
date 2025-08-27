@@ -157,6 +157,13 @@ def carregar_dados_publicos():
         
         df_clientes = pd.DataFrame(sheet_clientes_data[1:], columns=sheet_clientes_data[0])
         df_clientes['Início do Acompanhamento'] = pd.to_datetime(df_clientes['Início do Acompanhamento'], errors='coerce', dayfirst=True)
+        
+        # Lida com a nova coluna de vencimento
+        if 'Vencimento do Contrato' in df_clientes.columns:
+            df_clientes['Vencimento do Contrato'] = pd.to_datetime(df_clientes['Vencimento do Contrato'], errors='coerce', dayfirst=True)
+        else:
+            # Se a coluna não existir, cria uma vazia para evitar erros
+            df_clientes['Vencimento do Contrato'] = pd.NaT
 
         nomes_clientes = df_clientes['Nome'].tolist()
         dados_completos_clientes = {}
@@ -235,9 +242,13 @@ def adicionar_cliente_na_planilha(dados_cliente, df_carteira):
         spreadsheet = conectar_gsheets()
         
         sheet_clientes = spreadsheet.worksheet("Clientes")
+        # Calcula o vencimento inicial
+        vencimento_inicial = dados_cliente['inicio'] + pd.DateOffset(years=1)
+
         nova_linha = [
             dados_cliente['nome'], dados_cliente['celular'], dados_cliente['email'],
-            dados_cliente['plano'], dados_cliente['inicio'].strftime('%d/%m/%Y')
+            dados_cliente['plano'], dados_cliente['inicio'].strftime('%d/%m/%Y'),
+            vencimento_inicial.strftime('%d/%m/%Y') # Adiciona o vencimento
         ]
         sheet_clientes.append_row(nova_linha, value_input_option='USER_ENTERED')
         
@@ -341,16 +352,13 @@ def atualizar_lista_clientes(df_clientes_atualizado):
         # Prepara o DataFrame para ser salvo
         df_para_salvar = df_clientes_atualizado.copy()
         
-        # LÓGICA DE ATUALIZAÇÃO: Se o vencimento foi editado, recalcula o início.
-        # Isso prioriza a data de renovação editada pelo usuário.
-        df_para_salvar['Início do Acompanhamento'] = pd.to_datetime(df_para_salvar['Vencimento do Acompanhamento']) - pd.DateOffset(years=1)
-
         # Garante que apenas as colunas originais sejam salvas
-        colunas_originais = ['Nome', 'Celular', 'Email', 'Plano', 'Início do Acompanhamento']
+        colunas_originais = ['Nome', 'Celular', 'Email', 'Plano', 'Início do Acompanhamento', 'Vencimento do Contrato']
         df_para_salvar = df_para_salvar[colunas_originais]
 
-        # Formata a data para o formato string esperado pela planilha
+        # Formata as datas para o formato string esperado pela planilha
         df_para_salvar['Início do Acompanhamento'] = pd.to_datetime(df_para_salvar['Início do Acompanhamento']).dt.strftime('%d/%m/%Y')
+        df_para_salvar['Vencimento do Contrato'] = pd.to_datetime(df_para_salvar['Vencimento do Contrato']).dt.strftime('%d/%m/%Y')
 
         # Limpa a aba inteira e reescreve cabeçalho e dados
         sheet_clientes.clear() 
@@ -450,26 +458,31 @@ else:
         with st.form(key="edicao_clientes_form"):
             st.markdown("Adicione, remova ou edite os clientes abaixo. A coluna de ação é calculada automaticamente.")
             
-            # --- NOVA LÓGICA PARA VENCIMENTO DO ACOMPANHAMENTO ---
-            def calcular_proximo_vencimento(inicio_date):
-                if pd.isna(inicio_date):
-                    return pd.NaT
-                hoje = pd.to_datetime(date.today())
-                # Calcula o aniversário deste ano
-                aniversario_ano_atual = inicio_date.replace(year=hoje.year)
-                
-                # Se o aniversário deste ano já passou, o próximo é no ano que vem
-                if aniversario_ano_atual < hoje:
-                    return aniversario_ano_atual.replace(year=hoje.year + 1)
-                else:
-                    return aniversario_ano_atual
-
             df_clientes_display = df_clientes.copy()
-            df_clientes_display['Vencimento do Acompanhamento'] = df_clientes_display['Início do Acompanhamento'].apply(calcular_proximo_vencimento)
+            
+            # --- NOVA LÓGICA PARA VENCIMENTO DO ACOMPANHAMENTO ---
+            def calcular_vencimento_display(row):
+                vencimento_contrato = row['Vencimento do Contrato']
+                inicio_acompanhamento = row['Início do Acompanhamento']
+                
+                # Se houver uma data de vencimento, usa ela
+                if pd.notna(vencimento_contrato):
+                    hoje = pd.to_datetime(date.today())
+                    # Se a data já passou, calcula o próximo aniversário
+                    if vencimento_contrato < hoje:
+                        anos_passados = hoje.year - vencimento_contrato.year
+                        return vencimento_contrato + pd.DateOffset(years=anos_passados + 1)
+                    return vencimento_contrato
+                # Se não houver, calcula com base na data de início
+                elif pd.notna(inicio_acompanhamento):
+                    return inicio_acompanhamento + pd.DateOffset(years=1)
+                return pd.NaT
+
+            df_clientes_display['Vencimento do Contrato'] = df_clientes_display.apply(calcular_vencimento_display, axis=1)
 
             def gerar_acao_vencimento(row):
                 hoje = datetime.now()
-                vencimento = row['Vencimento do Acompanhamento']
+                vencimento = row['Vencimento do Contrato']
                 celular = row['Celular']
                 if pd.notna(vencimento) and vencimento.month == hoje.month and vencimento.year == hoje.year:
                     if pd.notna(celular) and str(celular).strip():
@@ -479,7 +492,7 @@ else:
 
             df_clientes_display['Ação'] = df_clientes_display.apply(gerar_acao_vencimento, axis=1)
 
-            colunas_para_exibir = ['Nome', 'Celular', 'Email', 'Plano', 'Início do Acompanhamento', 'Vencimento do Acompanhamento', 'Ação']
+            colunas_para_exibir = ['Nome', 'Celular', 'Email', 'Plano', 'Início do Acompanhamento', 'Vencimento do Contrato', 'Ação']
             
             clientes_editados = st.data_editor(
                 df_clientes_display[colunas_para_exibir],
@@ -487,8 +500,8 @@ else:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Início do Acompanhamento": st.column_config.DateColumn("Início", format="DD/MM/YYYY", required=True),
-                    "Vencimento do Acompanhamento": st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY", required=True),
+                    "Início do Acompanhamento": st.column_config.DateColumn("Início", format="DD/MM/YYYY", disabled=True),
+                    "Vencimento do Contrato": st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY", required=True),
                     "Ação": st.column_config.LinkColumn("Ação", display_text="Contatar 📞", disabled=True),
                     "Nome": st.column_config.TextColumn(required=True)
                 },
@@ -499,6 +512,7 @@ else:
 
         if submitted:
             with st.spinner("A atualizar lista de clientes..."):
+                # CORREÇÃO: Passa o dataframe editado para a função de salvar
                 sucesso = atualizar_lista_clientes(clientes_editados)
                 if sucesso:
                     st.success("Lista de clientes atualizada com sucesso!")
